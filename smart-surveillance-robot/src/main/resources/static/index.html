@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Public Surveillance Robot</title>
+<style>
+  :root { --bg:#f4f6f8; --card:#fff; --ink:#14202b; --muted:#5b6b7a; --line:#dde3e8; --accent:#c0362c; --ok:#1e8e4e; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1720; --card:#17222d; --ink:#e8eef3; --muted:#9db0c0; --line:#2a3947; --accent:#ef6a5f; --ok:#4cc27f; --warn:#f0b24a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+  h1 { font-size:1.25rem; margin:0; }
+  main { padding:0 24px 24px; display:grid; gap:16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; overflow-x:auto; }
+  .card h2 { font-size:1rem; margin:0 0 12px; }
+  .stats { display:flex; gap:12px; flex-wrap:wrap; padding:0 24px 16px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 16px; min-width:130px; }
+  .stat b { display:block; font-size:1.6rem; }
+  .stat span { color:var(--muted); font-size:.85rem; }
+  table { width:100%; border-collapse:collapse; font-size:.9rem; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; }
+  .pill { padding:2px 10px; border-radius:99px; font-size:.8rem; font-weight:600; border:1px solid currentColor; }
+  .ONLINE { color:var(--ok); } .OFFLINE { color:var(--muted); } .ALERT { color:var(--accent); }
+  .pad { display:grid; grid-template-columns:repeat(3, 64px); gap:8px; justify-content:start; margin-top:8px; }
+  button { font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:8px; padding:10px 0; }
+  button:hover { border-color:var(--accent); }
+  button.stop { background:var(--accent); color:#fff; border-color:var(--accent); }
+  input { font:inherit; width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--ink); }
+  img#stream { width:100%; max-width:640px; border-radius:8px; background:#000; margin-top:8px; display:block; }
+  .muted { color:var(--muted); font-size:.85rem; }
+  #err { color:var(--accent); padding:0 24px; min-height:1.2em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Smart Public Surveillance Robot</h1>
+  <span class="muted" id="who"></span>
+</header>
+<div id="err"></div>
+<section class="stats">
+  <div class="stat"><b id="sRobots">-</b><span>Active robots</span></div>
+  <div class="stat"><b id="sDet">-</b><span>Detections (24h)</span></div>
+  <div class="stat"><b id="sAlerts">-</b><span>Open alerts</span></div>
+</section>
+<main>
+  <section class="card">
+    <h2>Robot</h2>
+    <div id="robot" class="muted">Loading...</div>
+    <div class="pad" id="pad"></div>
+    <p class="muted" id="cmdMsg"></p>
+  </section>
+  <section class="card">
+    <h2>Live camera</h2>
+    <input id="streamUrl" placeholder="http://PI_IP:8000/stream.mjpg" aria-label="Camera stream URL">
+    <img id="stream" alt="Live camera stream (enter the Raspberry Pi stream URL above)">
+  </section>
+  <section class="card" style="grid-column: 1 / -1">
+    <h2>Open alerts</h2>
+    <table><thead><tr><th>Time</th><th>Type</th><th>Message</th><th>Telegram</th><th></th></tr></thead><tbody id="alerts"></tbody></table>
+  </section>
+  <section class="card" style="grid-column: 1 / -1">
+    <h2>Recent detections</h2>
+    <table><thead><tr><th>Time</th><th>Robot</th><th>Object</th><th>Confidence</th><th>Location</th><th>Alert</th></tr></thead><tbody id="dets"></tbody></table>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const fmt = t => t ? new Date(t).toLocaleString() : '-';
+let currentRobot = null;
+
+async function api(path, opts) {
+  const res = await fetch(path, Object.assign({ credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } }, opts));
+  if (!res.ok) throw new Error(path + ' -> HTTP ' + res.status);
+  return res.status === 204 ? null : res.json();
+}
+function cell(tr, text) { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); return td; }
+function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+
+async function refresh() {
+  try {
+    const [stats, robots, dets, alerts] = await Promise.all([
+      api('/api/stats'), api('/api/robots'),
+      api('/api/detections?size=10'), api('/api/alerts?acknowledged=false&size=10')
+    ]);
+    $('err').textContent = '';
+    $('sRobots').textContent = stats.activeRobots + ' / ' + stats.totalRobots;
+    $('sDet').textContent = stats.detectionsLast24h;
+    $('sAlerts').textContent = stats.openAlerts;
+
+    const box = $('robot'); clear(box);
+    if (robots.length) {
+      const r = robots[0]; currentRobot = r.robotCode;
+      const name = document.createElement('div'); name.textContent = r.name + ' (' + r.robotCode + ') ';
+      const pill = document.createElement('span'); pill.className = 'pill ' + r.status; pill.textContent = r.status; name.appendChild(pill);
+      const seen = document.createElement('div'); seen.className = 'muted'; seen.textContent = 'Last seen: ' + fmt(r.lastSeenAt);
+      const loc = document.createElement('div'); loc.className = 'muted';
+      loc.textContent = 'Location: ' + (r.latitude != null ? r.latitude.toFixed(5) + ', ' + r.longitude.toFixed(5) : 'unknown');
+      box.append(name, seen, loc);
+    } else { box.textContent = 'No robots registered'; }
+
+    const tb = $('dets'); clear(tb);
+    dets.content.forEach(d => {
+      const tr = document.createElement('tr');
+      cell(tr, fmt(d.detectedAt)); cell(tr, d.robotCode); cell(tr, d.objectClass);
+      cell(tr, Math.round(d.confidence * 100) + '%');
+      cell(tr, d.latitude != null ? d.latitude.toFixed(5) + ', ' + d.longitude.toFixed(5) : '-');
+      cell(tr, d.alertSent ? 'sent' : '-');
+      tb.appendChild(tr);
+    });
+
+    const ab = $('alerts'); clear(ab);
+    alerts.content.forEach(a => {
+      const tr = document.createElement('tr');
+      cell(tr, fmt(a.createdAt)); cell(tr, a.type); cell(tr, a.message); cell(tr, a.delivered ? 'delivered' : '-');
+      const td = document.createElement('td'); const b = document.createElement('button');
+      b.textContent = 'Acknowledge'; b.style.padding = '4px 10px';
+      b.onclick = async () => { await api('/api/alerts/' + a.id + '/acknowledge', { method: 'POST' }); refresh(); };
+      td.appendChild(b); tr.appendChild(td); ab.appendChild(tr);
+    });
+  } catch (e) { $('err').textContent = e.message; }
+}
+
+async function sendCommand(cmd) {
+  if (!currentRobot) return;
+  try {
+    await api('/api/robots/' + encodeURIComponent(currentRobot) + '/commands', { method: 'POST', body: JSON.stringify({ command: cmd }) });
+    $('cmdMsg').textContent = cmd + ' queued at ' + new Date().toLocaleTimeString();
+  } catch (e) { $('cmdMsg').textContent = e.message; }
+}
+
+// control pad
+[['', ''], ['FORWARD', 'Fwd'], ['', ''], ['LEFT', 'Left'], ['STOP', 'Stop'], ['RIGHT', 'Right'], ['', ''], ['REVERSE', 'Rev'], ['', '']]
+  .forEach(([cmd, label]) => {
+    if (!cmd) { $('pad').appendChild(document.createElement('span')); return; }
+    const b = document.createElement('button'); b.textContent = label; if (cmd === 'STOP') b.className = 'stop';
+    b.onclick = () => sendCommand(cmd); $('pad').appendChild(b);
+  });
+
+$('streamUrl').value = localStorage.getItem('streamUrl') || '';
+function applyStream() {
+  const u = $('streamUrl').value.trim();
+  try { localStorage.setItem('streamUrl', u); } catch (e) { /* storage may be blocked */ }
+  $('stream').src = /^https?:\/\//i.test(u) ? u : '';
+}
+$('streamUrl').addEventListener('change', applyStream); applyStream();
+
+api('/api/me').then(m => { $('who').textContent = 'Signed in as ' + m.username; }).catch(() => {});
+refresh(); setInterval(refresh, 3000);
+</script>
+</body>
+</html>
